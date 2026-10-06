@@ -1,5 +1,9 @@
 """本地威胁检测与告警关联流程。"""
 
+from .correlation import AlertCorrelator
+from .detection import DetectionEngine
+from .disposition import AlertDispositionService, ConflictError, DispositionError
+from .ingest import EventIngester
 from .models import (
     Alert,
     AlertStatus,
@@ -8,26 +12,33 @@ from .models import (
     DetectionRule,
     IngestResult,
     LogEvent,
+    ProcessOutcome,
+    ProcessResult,
     RejectReason,
+    RuleHit,
 )
-from .ingest import EventIngester
-from .detection import DetectionEngine
-from .correlation import AlertCorrelator
-from .disposition import AlertDispositionService
+from .persistence import SnapshotStore, StateCorruptionError
 from .pipeline import SiemPipeline
 
 __all__ = [
     "Alert",
+    "AlertCorrelator",
+    "AlertDispositionService",
     "AlertStatus",
     "AuditAction",
     "AuditRecord",
+    "ConflictError",
+    "DetectionEngine",
     "DetectionRule",
+    "DispositionError",
+    "EventIngester",
     "IngestResult",
     "LogEvent",
+    "ProcessOutcome",
+    "ProcessResult",
     "RejectReason",
-    "EventIngester",
-    "DetectionEngine",
-    "AlertCorrelator",
-    "AlertDispositionService",
+    "RuleHit",
     "SiemPipeline",
+    "SnapshotStore",
+    "StateCorruptionError",
 ]

@@ -11,12 +11,15 @@
 ```
 
 - `siem/models.py` — 数据模型：`LogEvent`、`DetectionRule`、`Alert`、`AuditRecord`、
-  `RejectReason` / `AlertStatus` / `AuditAction` 枚举。
+  `RejectReason` / `AlertStatus` / `AuditAction` / `ProcessOutcome` 枚举、
+  `ProcessResult` / `RuleHit` 处理结论。
 - `siem/ingest.py` — 事件摄入：校验、重复投递去重、乱序容忍。
 - `siem/detection.py` — 规则匹配引擎，支持规则集整体替换（版本化）。
 - `siem/correlation.py` — 告警关联与抑制窗口去重。
-- `siem/disposition.py` — 告警状态机与审计，线程安全。
-- `siem/pipeline.py` — 端到端流水线 `SiemPipeline.process(event)`。
+- `siem/disposition.py` — 告警状态机与审计，线程安全；带前置校验的处置入口。
+- `siem/persistence.py` — 本地状态快照：原子写入、校验和校验、损坏回退。
+- `siem/pipeline.py` — 端到端流水线 `SiemPipeline.process(event)` /
+  `SiemPipeline.process_event(event)`。
 - `main.py` — FastAPI 入口（`/events`、`/alerts`、`/alerts/{id}/{action}`、`/audit`、`/stats`）。
 
 ## 检测规则模型
@@ -79,20 +82,84 @@ OPEN  -------------> ACKNOWLEDGED -----> CLOSED
 - 每次处置动作（含被拒绝的尝试）都追加 `AuditRecord`，
   被拒绝的记录以 `rejected:` 前缀标识原因，审计链中相邻成功记录的状态首尾相接。
 
+## 处理结论分类
+
+`SiemPipeline.process_event(event)` 返回 `ProcessResult`，
+`outcome` 字段给出五类稳定、可区分、可解释的结论，
+只看结论与说明就知道该怎么继续处理：
+
+| outcome | 含义 | 后续处理 |
+| --- | --- | --- |
+| `rejected_invalid` | 数据本身有问题被挡掉（缺字段/非法时间戳/超出乱序容忍） | 检查上游数据，`ingest.reason` 给出具体原因 |
+| `skipped_duplicate` | 重复投递被跳过，不重复计数 | 无需处理，投递方收到的是确定性结论 |
+| `accepted_no_match` | 数据合法但未命中任何规则，未产生告警 | 正常现象；如需覆盖可补充规则 |
+| `alert_created` | 命中规则并新建告警 | 进入处置流程 |
+| `alert_suppressed` | 命中规则，但事件被已有告警的抑制窗口吸收 | 关注原告警即可，`suppressed_count` 已累计 |
+
+- 命中规则时 `hits` 记录每条命中规则的 `rule_id`、`rule_version`、
+  关联到的 `alert_id` 及是否新建，命中依据完全可解释。
+- 同样的输入流必得到同样的分类序列：判定只依赖事件内容与事件时间，
+  不依赖到达时刻或随机因素；窗口判定按事件时间，
+  乱序到达（容忍窗口内）的事件仍按其事件时间落入正确窗口。
+- 原 `process(event)` 接口签名与返回结构保持不变。
+
+## 状态保存与恢复
+
+`pipeline.save(path)` / `SiemPipeline.load(path, rules, ...)` 把检测、关联、
+处置的全部运行状态保存到本地文件并恢复（仅标准库 + 本地文件，离线可复现）：
+
+- 保存内容：已见 `event_id` 集合与水位线、全部告警（含证据 `event_ids`、
+  每条抑制窗口的起点 `created_at`、窗口长度由 `suppression_window` 参数给出）、
+  告警处置状态、审计轨迹、三类计数器、告警 ID 序号。
+- 恢复效果：重启或换新实例后，之前关联的证据、抑制窗口起止、处置状态都在；
+  恢复前处理过的事件再投递仍判 `skipped_duplicate`，不重复计数、不冒出重复告警；
+  告警 ID 序号接续分配，窗口外事件照常产生新告警，不因恢复漏告警。
+- 写入是原子的：先写临时文件并 fsync，再 `os.replace` 替换；
+  写一半崩溃不会留下截断的正式文件。替换前上一份完整状态保留为 `<path>.bak`。
+- 每份状态带 sha256 校验和。读取时正式文件损坏/被截断/被篡改，
+  自动回退到 `<path>.bak` 的上一份完整状态；两份都损坏则抛
+  `StateCorruptionError` 明确报错，绝不悄悄读出坏状态继续跑。
+- 兼容范围：状态格式带 `format` 版本号（当前为 1），格式不符即报错而非猜测。
+  检测规则属于配置而非状态，恢复时由调用方提供当前规则集；
+  关联键中携带规则版本，用新规则集恢复不会污染旧告警。
+  关联键取值须为 JSON 标量（字符串/数值/null）。
+  `accepted_events()` 的内存历史列表不在持久化范围内。
+- HTTP 服务模式：设置环境变量 `SIEM_STATE_PATH` 后，启动时自动恢复
+  （文件不存在则全新启动），每次状态变更（含被拒绝的处置尝试）后自动落盘。
+
+## 前置校验处置与计数口径
+
+- `disposition.transition(alert_id, action, actor, timestamp, expected_version=...)`
+  是带前置校验的处置入口：调用方声明它认为的当前修订（`alert.version`，
+  可由 `/alerts` 的 `version` 字段获得），一致才允许流转。
+- 修订对不上抛 `ConflictError`（HTTP 409 `error=conflict`），
+  与非法状态跃迁的 `DispositionError`（HTTP 409 `error=illegal_transition`）
+  是不同的异常类型，不会混为一谈；`expected_version=None` 时退化为无校验流转。
+- 冲突与非法跃迁的尝试同样写入审计，分别以 `conflict:` / `rejected:` 前缀区分。
+- 三类计数各自独立（`pipeline.counters()` 与 `/stats`）：
+  - `correlated_events`：关联进告警的事件数（新建 + 被抑制吸收）；
+  - `successful_transitions`：成功流转次数；
+  - `attempted_transitions`：累计尝试次数（含冲突与非法跃迁）。
+- 多线程同时处置同一条告警：检查与修改在同一把锁内完成，
+  带相同 `expected_version` 的并发请求恰好一个成功、其余收到冲突，
+  无非法跃迁、无丢失更新，状态与计数始终一致。
+
 ## 本地验证
 
 ```bash
-# 单元测试（仅标准库，覆盖乱序/重复、抑制窗口边界、并发处置；
-# 日志打印事件输入与关联判定依据）
+# 单元测试（仅标准库，覆盖乱序/重复、抑制窗口边界、并发处置、
+# 处理结论分类、保存后重启恢复、前置校验并发冲突；
+# 日志打印事件输入、命中规则与窗口判定依据）
 python3 -m unittest discover -s tests -v
 
-# 启动 HTTP 服务
-uv run python main.py   # 或 uv run uvicorn main:app --port 8000
+# 启动 HTTP 服务（SIEM_STATE_PATH 可选，设置后启用状态保存/恢复）
+uv run python main.py   # 或 SIEM_STATE_PATH=./state.json uv run uvicorn main:app --port 8000
 
-# 示例：上报事件 -> 告警被抑制聚合 -> 处置 -> 查看审计
+# 示例：上报事件 -> 告警被抑制聚合 -> 带前置校验处置 -> 查看审计与计数
 curl -X POST localhost:8000/events -H 'content-type: application/json' -d \
   '{"event_id":"e1","timestamp":1000.0,"event_type":"login_failed","source":"h1","attributes":{"user":"root"}}'
 curl -X POST localhost:8000/alerts/alert-0001/acknowledge -H 'content-type: application/json' -d \
-  '{"actor":"op","timestamp":2000.0}'
+  '{"actor":"op","timestamp":2000.0,"expected_version":0}'
 curl localhost:8000/audit
+curl localhost:8000/stats
 ```

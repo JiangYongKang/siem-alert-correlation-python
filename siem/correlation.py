@@ -66,3 +66,40 @@ class AlertCorrelator:
     def alerts(self) -> list[Alert]:
         with self._lock:
             return [a for alerts in self._by_key.values() for a in alerts]
+
+    def get(self, alert_id: str) -> Alert | None:
+        with self._lock:
+            for alerts in self._by_key.values():
+                for alert in alerts:
+                    if alert.alert_id == alert_id:
+                        return alert
+            return None
+
+    def snapshot(self) -> dict:
+        """导出可持久化状态：全部告警（含抑制窗口起点 created_at 与证据）与序号。
+
+        抑制窗口由 created_at 与 suppression_window 派生，
+        保存 created_at 即保存了每条窗口的起止。
+        """
+        from .persistence import alert_to_dict
+
+        with self._lock:
+            alerts = sorted(
+                (a for alerts in self._by_key.values() for a in alerts),
+                key=lambda a: a.alert_id,
+            )
+            return {
+                "seq": self._seq,
+                "alerts": [alert_to_dict(a) for a in alerts],
+            }
+
+    def restore(self, state: dict) -> None:
+        """从快照恢复告警与序号。恢复后窗口判定与恢复前完全一致。"""
+        from .persistence import alert_from_dict
+
+        with self._lock:
+            self._by_key = {}
+            self._seq = state["seq"]
+            for data in state["alerts"]:
+                alert = alert_from_dict(data)
+                self._by_key.setdefault(alert.correlation_key, []).append(alert)

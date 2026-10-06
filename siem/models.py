@@ -108,3 +108,41 @@ class IngestResult:
     event_id: str
     reason: RejectReason | None = None
     detail: str = ""
+
+
+class ProcessOutcome(enum.Enum):
+    """事件处理的最终结论分类，稳定、可区分、可解释。
+
+    同样的输入必得到同样的分类，与到达顺序无关。
+    """
+
+    REJECTED_INVALID = "rejected_invalid"      # 数据本身有问题被挡掉
+    SKIPPED_DUPLICATE = "skipped_duplicate"    # 重复投递被跳过
+    ACCEPTED_NO_MATCH = "accepted_no_match"    # 数据没问题但未命中任何规则
+    ALERT_CREATED = "alert_created"            # 命中规则并新建告警
+    ALERT_SUPPRESSED = "alert_suppressed"      # 命中规则但被已有告警抑制窗口吸收
+
+
+@dataclass(frozen=True)
+class RuleHit:
+    """一条规则命中的可解释记录。"""
+
+    rule_id: str
+    rule_version: int
+    alert_id: str
+    created: bool  # True=新建告警，False=被已有告警窗口吸收
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """一条事件的完整处理结论。
+
+    outcome 给出五类稳定分类之一；ingest 保留底层摄入结果；
+    hits 记录命中的规则与规则版本及关联去向。
+    """
+
+    outcome: ProcessOutcome
+    event_id: str
+    ingest: IngestResult
+    hits: tuple[RuleHit, ...] = ()
+    detail: str = ""
