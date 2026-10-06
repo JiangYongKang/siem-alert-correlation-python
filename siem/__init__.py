@@ -6,14 +6,21 @@ from .models import (
     AuditAction,
     AuditRecord,
     DetectionRule,
+    DispositionCounters,
     IngestResult,
     LogEvent,
+    OutcomeCategory,
+    ProcessOutcome,
     RejectReason,
+    RuleHit,
+    TransitionOutcome,
+    TransitionResult,
 )
 from .ingest import EventIngester
 from .detection import DetectionEngine
 from .correlation import AlertCorrelator
-from .disposition import AlertDispositionService
+from .disposition import AlertDispositionService, ConflictError, DispositionError
+from .persistence import StateCorruptionError
 from .pipeline import SiemPipeline
 
 __all__ = [
@@ -22,12 +29,21 @@ __all__ = [
     "AuditAction",
     "AuditRecord",
     "DetectionRule",
+    "DispositionCounters",
     "IngestResult",
     "LogEvent",
+    "OutcomeCategory",
+    "ProcessOutcome",
     "RejectReason",
+    "RuleHit",
+    "TransitionOutcome",
+    "TransitionResult",
     "EventIngester",
     "DetectionEngine",
     "AlertCorrelator",
     "AlertDispositionService",
+    "ConflictError",
+    "DispositionError",
+    "StateCorruptionError",
     "SiemPipeline",
 ]

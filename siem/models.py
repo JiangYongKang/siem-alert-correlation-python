@@ -108,3 +108,82 @@ class IngestResult:
     event_id: str
     reason: RejectReason | None = None
     detail: str = ""
+
+
+class OutcomeCategory(enum.Enum):
+    """事件处理结论分类：只看类别与说明即可决定后续动作。
+
+    - REJECTED_INVALID：数据本身有问题，被摄入校验挡掉（修正数据后重投）。
+    - SKIPPED_DUPLICATE：重复投递被跳过（无需处理，不会重复计数）。
+    - PROCESSED_NO_MATCH：数据没问题但未命中任何规则，未产生告警。
+    - ALERT_CREATED：命中规则并创建了新告警。
+    - ALERT_SUPPRESSED：命中规则但被已有告警的抑制窗口收编，未产生新告警。
+    """
+
+    REJECTED_INVALID = "rejected_invalid"
+    SKIPPED_DUPLICATE = "skipped_duplicate"
+    PROCESSED_NO_MATCH = "processed_no_match"
+    ALERT_CREATED = "alert_created"
+    ALERT_SUPPRESSED = "alert_suppressed"
+
+
+@dataclass(frozen=True)
+class RuleHit:
+    """一次规则命中的可解释记录。"""
+
+    rule_id: str
+    rule_version: int
+    alert_id: str
+    created: bool  # True=新建告警；False=被已有告警抑制窗口收编
+    window_start: float
+    window_end: float
+
+
+@dataclass(frozen=True)
+class ProcessOutcome:
+    """一条事件的完整处理结论。
+
+    同样的输入必得到同样的分类，与到达顺序无关。
+    原有 IngestResult 字段继续可用，本结构为新增的可解释视图。
+    """
+
+    category: OutcomeCategory
+    event_id: str
+    detail: str
+    reason: RejectReason | None = None  # 仅 REJECTED_INVALID / SKIPPED_DUPLICATE 时有值
+    hits: tuple[RuleHit, ...] = ()  # 命中的规则与规则版本（可多条）
+
+
+class TransitionOutcome(enum.Enum):
+    """处置尝试结论：成功、修订冲突、非法跃迁、告警不存在。"""
+
+    APPLIED = "applied"
+    CONFLICT = "conflict"
+    INVALID_TRANSITION = "invalid_transition"
+    NOT_FOUND = "not_found"
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    """一次带前置校验的处置尝试结果（不抛异常，结论可区分）。"""
+
+    outcome: TransitionOutcome
+    alert_id: str
+    action: AuditAction
+    actor: str
+    detail: str
+    record: AuditRecord | None = None  # 留痕的审计记录（含被拒绝的尝试）
+
+
+@dataclass(frozen=True)
+class DispositionCounters:
+    """告警计数口径，三类各自独立：
+
+    - correlated_events：关联进该告警的事件总数（含被抑制收编的）。
+    - transitions_applied：成功流转次数（等于 alert.version 中处置贡献的部分）。
+    - transitions_attempted：累计处置尝试次数（含冲突与非法跃迁的拒绝）。
+    """
+
+    correlated_events: int = 0
+    transitions_applied: int = 0
+    transitions_attempted: int = 0

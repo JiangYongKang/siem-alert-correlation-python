@@ -74,3 +74,16 @@ class EventIngester:
     def accepted_events(self) -> list[LogEvent]:
         with self._lock:
             return list(self._accepted)
+
+    def snapshot(self) -> tuple[list[str], float | None]:
+        """导出 (已见 event_id 列表, 水位线)，用于持久化。"""
+        with self._lock:
+            return sorted(self._seen_ids), self._watermark
+
+    def restore(self, seen_ids: list[str], watermark: float | None) -> None:
+        """从持久化状态恢复去重集合与水位线。恢复后重复投递仍被跳过、不重复计数。"""
+        with self._lock:
+            if self._seen_ids:
+                raise ValueError("只能在未摄入过事件的摄入器上恢复状态")
+            self._seen_ids = set(seen_ids)
+            self._watermark = watermark

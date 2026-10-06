@@ -27,6 +27,25 @@ class AlertCorrelator:
         self._seq = 0
         self._lock = threading.Lock()
 
+    def window_of(self, alert: Alert) -> tuple[float, float]:
+        """告警的抑制窗口 [start, end)，左闭右开。"""
+        return alert.created_at, alert.created_at + self.suppression_window
+
+    @property
+    def seq(self) -> int:
+        """告警序号（用于持久化后恢复，保证重启后告警 ID 不与历史冲突）。"""
+        with self._lock:
+            return self._seq
+
+    def restore(self, alerts: list[Alert], seq: int) -> None:
+        """从持久化状态恢复告警与序号。仅在空状态实例上调用。"""
+        with self._lock:
+            if self._by_key:
+                raise ValueError("只能在未处理过事件的关联器上恢复状态")
+            for alert in alerts:
+                self._by_key.setdefault(tuple(alert.correlation_key), []).append(alert)
+            self._seq = seq
+
     def correlate(self, event: LogEvent, rule: DetectionRule) -> tuple[Alert, bool]:
         """返回 (告警, 是否新建告警)。"""
         key = rule.correlation_key(event)
